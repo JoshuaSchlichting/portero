@@ -1,0 +1,76 @@
+[package]
+name = "portero"
+version = "0.1.0"
+edition = "2021"
+description = "Portero: a Pingora-based reverse proxy with dynamic backend registration"
+license = "Apache-2.0"
+authors = ["Joshua Schlichting <7680545+JoshuaSchlichting@users.noreply.github.com>"]
+
+# Single binary service
+[[bin]]
+name = "portero"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Serialization for JSON payloads
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# JWT validation (HMAC/HS256)
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+
+# HTTP types and status codes (optional helpers)
+http = "0.2"
+
+# Time handling for expirations
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+# Error handling convenience
+anyhow = "1"
+
+# Pingora framework from Cloudflare (use latest from GitHub; Pin a revision for reproducibility in production)
+pingora = { git = "https://github.com/cloudflare/pingora", package = "pingora", features = ["boringssl"] }
+
+# TLS support; Pingora uses rustls internally, but we may need types/utilities
+
+
+
+# For IPv6 parsing/validation utilities if needed
+ipnet = "2"
+hyper = { version = "0.14", features = ["full"] }
+tower = "0.4"
+async-trait = "0.1"
+pingora-core = { git = "https://github.com/cloudflare/pingora", package = "pingora-core", features = ["boringssl"] }
+pingora-proxy = { git = "https://github.com/cloudflare/pingora", package = "pingora-proxy", features = ["boringssl"] }
+pingora-http = { git = "https://github.com/cloudflare/pingora", package = "pingora-http" }
+boring = "4.20.0"
+
+# Optional: Small LRU or cache utilities (commented out; enable if needed)
+# lru = "0.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[features]
+default = []
+
+[patch.'https://github.com/cloudflare/pingora']
+pingora-core = { path = "vendor/pingora/pingora-core" }
+pingora-proxy = { path = "vendor/pingora/pingora-proxy" }
+pingora-http = { path = "vendor/pingora/pingora-http" }
+pingora = { path = "vendor/pingora/pingora" }
