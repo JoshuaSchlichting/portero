@@ -371,16 +371,24 @@ TLS listener configuration now uses TlsSettings::intermediate with PEM paths dir
 ///
 /// TODO: Instantiate Pingora server, configure TLS listener at `listen_addr`,
 /// and register the HTTP proxy service using hooks described above.
-async fn run_pingora_proxy(
+fn run_pingora_proxy(
     state: AppState,
     listen_addr: String,
     tls_cert_dir: String,
+    register_addr: String,
 ) -> Result<()> {
     info!("Proxy listening (TCP) on {}", listen_addr);
 
-    // Initialize Pingora server
-    let mut server = Server::new(None).context("create Pingora server")?;
-    server.bootstrap();
+    // Create Tokio runtime for Pingora to use
+    let mut my_opt = pingora_core::server::configuration::Opt::default();
+    my_opt.upgrade = false;
+    my_opt.daemon = false;
+    my_opt.nocapture = false;
+    my_opt.test = false;
+    my_opt.conf = None;
+
+    // Initialize Pingora server with runtime
+    let mut server = Server::new(Some(my_opt)).context("create Pingora server")?;
 
     // Define PorteroProxy implementing ProxyHttp with round-robin backend selection
     struct PorteroProxy {
@@ -421,8 +429,8 @@ async fn run_pingora_proxy(
                 }
             };
 
-            // Upstream uses TLS (HTTPS) to IPv6 backend with SNI set to Host
-            let peer = Box::new(HttpPeer::new(backend.socket_addr(), true, host.clone()));
+            // Upstream uses HTTP (no TLS) to IPv6 backend
+            let peer = Box::new(HttpPeer::new(backend.socket_addr(), false, host.clone()));
             Ok(peer)
         }
 
@@ -448,21 +456,18 @@ async fn run_pingora_proxy(
             state: state.clone(),
         },
     );
-    // Keep TCP listener for plain HTTP if needed
-    proxy.add_tcp(&listen_addr);
-    // Initialize TLS cert store and spawn periodic refresh task (30s)
+    // Don't add TCP listener - we'll use TLS listener only
+    // proxy.add_tcp(&listen_addr);
+    // Initialize TLS cert store
     let cert_store = Arc::new(RwLock::new(
         TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default(),
     ));
-    tokio::spawn(run_cert_refresh_task(
-        cert_store.clone(),
-        tls_cert_dir.clone(),
-        Duration::from_secs(30),
-    ));
+
     // Add a TLS listener using callbacks for SNI selection with default cert fallback
     let default_sni = {
-        let guard = cert_store.read().await;
-        guard.default_sni.clone()
+        // Get the default SNI from the loaded cert store
+        let store = TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default();
+        store.default_sni.clone()
     };
 
     if let Some(sni) = default_sni {
@@ -495,13 +500,59 @@ async fn run_pingora_proxy(
         );
     }
 
-    // Add service and run
+    // Add service
     server.add_service(proxy);
+
+    // Bootstrap the server - this sets up the runtime
+    server.bootstrap();
+
+    // Now we have a runtime available, spawn background tasks
+    let cert_refresh_store = cert_store.clone();
+    let cert_refresh_dir = tls_cert_dir.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            run_cert_refresh_task(
+                cert_refresh_store,
+                cert_refresh_dir,
+                Duration::from_secs(30),
+            )
+            .await;
+        });
+    });
+
+    let exp_state = state.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            run_expiration_task(exp_state).await;
+        });
+    });
+
+    let reg_state = state.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            if let Err(e) = run_registration_api(reg_state, register_addr).await {
+                error!("registration API error: {e:?}");
+            }
+        });
+    });
+
+    // Run the server
     server.run_forever()
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Logging
     fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
@@ -513,34 +564,11 @@ async fn main() -> Result<()> {
     // Build shared state
     let state = AppState::new(cli.register_secret.clone(), cli.jwt_hmac_key.clone());
 
-    // Spawn expiration task
-    tokio::spawn(run_expiration_task(state.clone()));
-
-    // Spawn registration API
-    let reg_state = state.clone();
-    let register_addr = cli.register_addr.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_registration_api(reg_state, register_addr).await {
-            error!("registration API error: {e:?}");
-        }
-    });
-
-    // Run Pingora proxy
-    if let Err(e) =
-        run_pingora_proxy(state, cli.listen_addr.clone(), cli.tls_cert_dir.clone()).await
-    {
-        error!("proxy failed to start: {e:?}");
-        return Err(e);
-    }
-
-    // Keep running; in a real server run_pingora_proxy would block.
-    warn!("Proxy skeleton started; awaiting tasks. Replace with actual Pingora server run loop.");
-    // Prevent main from exiting immediately.
-    loop {
-        tokio::signal::ctrl_c().await?;
-        info!("Received Ctrl-C, shutting down...");
-        break;
-    }
-
-    Ok(())
+    // Run Pingora proxy (this will handle its own runtime and block)
+    run_pingora_proxy(
+        state,
+        cli.listen_addr.clone(),
+        cli.tls_cert_dir.clone(),
+        cli.register_addr.clone(),
+    )
 }
