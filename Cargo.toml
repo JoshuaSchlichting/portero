@@ -68,9 +68,3 @@ opt-level = 1
 
 [features]
 default = []
-
-[patch.'https://github.com/cloudflare/pingora']
-pingora-core = { path = "vendor/pingora/pingora-core" }
-pingora-proxy = { path = "vendor/pingora/pingora-proxy" }
-pingora-http = { path = "vendor/pingora/pingora-http" }
-pingora = { path = "vendor/pingora/pingora" }

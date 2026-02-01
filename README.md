@@ -57,8 +57,10 @@ Why both secret and JWT?
 
 ## Build and run
 
-This repo vendors Pingora to expose the TLS APIs we need. The build uses the BoringSSL backend.
+This project uses upstream Pingora from GitHub with the BoringSSL backend enabled.
 
+- Dependencies:
+  - Requires `cmake` for building BoringSSL (install via package manager)
 - Build:
   - `cargo build` (debug) or `cargo build --release`
 - Run (example):

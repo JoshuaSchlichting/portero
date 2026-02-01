@@ -1,38 +1,32 @@
-use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use clap::Parser;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use pingora_core::listeners::TlsAccept;
+use pingora_core::server::Server;
+use pingora_core::upstreams::peer::HttpPeer;
+use pingora_core::ErrorType;
+use pingora_proxy::http_proxy_service;
+use pingora_proxy::{ProxyHttp, Session};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
-use async_trait::async_trait;
-use pingora_core::server::Server;
-use pingora_core::upstreams::peer::HttpPeer;
-use pingora_proxy::{ProxyHttp, Session};
-use pingora_core::ErrorType;
-use pingora_proxy::http_proxy_service;
-use pingora_core::listeners::TlsAccept;
-use pingora_core::protocols::tls::TlsRef;
-use hyper::{Body, Request, Response, Method, StatusCode};
+
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server as HyperServer;
-mod tls;
+use hyper::{Body, Method, Request, Response, StatusCode};
 mod registry;
-use crate::tls::{SniCallbacks, tls_settings_with_callbacks, run_cert_refresh_task, TlsCertStore};
+mod tls;
 use crate::registry::{Backend, Registry};
+use crate::tls::{run_cert_refresh_task, tls_settings_with_callbacks, SniCallbacks, TlsCertStore};
 
 // TLS certificate store and periodic refresh scaffolding for single SNI-enabled listener.
-
-
-
-
-
 
 /// NOTE:
 /// This file provides a minimal skeleton for a Pingora-based reverse proxy service
@@ -46,7 +40,11 @@ use crate::registry::{Backend, Registry};
 
 /// CLI for the Portero reverse proxy.
 #[derive(Debug, Parser)]
-#[command(name = "portero", version, about = "Pingora-based reverse proxy with dynamic backend registration")]
+#[command(
+    name = "portero",
+    version,
+    about = "Pingora-based reverse proxy with dynamic backend registration"
+)]
 struct Cli {
     /// Public proxy listen address (terminates TLS and proxies traffic)
     #[arg(long)]
@@ -87,15 +85,10 @@ struct RegisterClaims {
 /// Backend endpoint for a service.
 // Moved to module: see `registry::models::Backend`
 
-
 // Moved to module: see `registry::models::Backend` methods `socket_addr` and `is_expired`
 
 /// Runtime state for routing and registration.
 // Moved to module: see `registry::models::Registry`
-
-
-
-
 
 /// Shared application state held behind Arc<RwLock<...>>.
 #[derive(Clone)]
@@ -185,11 +178,7 @@ async fn handle_register(
     body: &[u8],
 ) -> Result<http::Response<Vec<u8>>> {
     // Validate content type
-    if content_type
-        .map(|ct| ct.to_ascii_lowercase())
-        .as_deref()
-        != Some("application/json")
-    {
+    if content_type.map(|ct| ct.to_ascii_lowercase()).as_deref() != Some("application/json") {
         let resp = http::Response::builder()
             .status(http::StatusCode::UNSUPPORTED_MEDIA_TYPE)
             .body(b"Content-Type must be application/json".to_vec())
@@ -210,7 +199,9 @@ async fn handle_register(
         &payload.service_name,
     ) {
         let status = match e.to_string().as_str() {
-            "missing shared secret header" | "missing bearer token" => http::StatusCode::UNAUTHORIZED,
+            "missing shared secret header" | "missing bearer token" => {
+                http::StatusCode::UNAUTHORIZED
+            }
             "invalid shared secret" | "unsupported JWT algorithm" | "JWT service_name mismatch" => {
                 http::StatusCode::FORBIDDEN
             }
@@ -328,9 +319,9 @@ async fn run_registration_api(state: AppState, register_addr: String) -> Result<
                                 .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim()));
 
                             // Read body
-                            let whole = hyper::body::to_bytes(body_stream).await.map_err(|e| {
-                                anyhow!("failed to read request body: {e}")
-                            })?;
+                            let whole = hyper::body::to_bytes(body_stream)
+                                .await
+                                .map_err(|e| anyhow!("failed to read request body: {e}"))?;
                             let resp = handle_register(
                                 &state,
                                 content_type,
@@ -374,19 +365,17 @@ async fn run_registration_api(state: AppState, register_addr: String) -> Result<
 ///
 /// TODO: Implement reading PEM files from tls_cert_dir and wiring them into Pingora's TLS config.
 /* configure_pingora_tls removed: rustls-specific helper is no longer needed with BoringSSL/OpenSSL.
-   TLS listener configuration now uses TlsSettings::intermediate with PEM paths directly. */
-
-
-
-
-
-
+TLS listener configuration now uses TlsSettings::intermediate with PEM paths directly. */
 
 /// Start the Pingora-based proxy service.
 ///
 /// TODO: Instantiate Pingora server, configure TLS listener at `listen_addr`,
 /// and register the HTTP proxy service using hooks described above.
-async fn run_pingora_proxy(state: AppState, listen_addr: String, tls_cert_dir: String) -> Result<()> {
+async fn run_pingora_proxy(
+    state: AppState,
+    listen_addr: String,
+    tls_cert_dir: String,
+) -> Result<()> {
     info!("Proxy listening (TCP) on {}", listen_addr);
 
     // Initialize Pingora server
@@ -406,7 +395,11 @@ async fn run_pingora_proxy(state: AppState, listen_addr: String, tls_cert_dir: S
             ()
         }
 
-        async fn upstream_peer(&self, _session: &mut Session, _ctx: &mut Self::CTX) -> pingora_core::Result<Box<HttpPeer>> {
+        async fn upstream_peer(
+            &self,
+            _session: &mut Session,
+            _ctx: &mut Self::CTX,
+        ) -> pingora_core::Result<Box<HttpPeer>> {
             // NOTE: For simplicity, map Host -> service_name equal to Host.
             // If Host is missing, use empty string; registry lookup will fail gracefully.
             let host = _session
@@ -420,7 +413,11 @@ async fn run_pingora_proxy(state: AppState, listen_addr: String, tls_cert_dir: S
             let backend = match reg.next_backend(&host, &host) {
                 Some(b) => b,
                 None => {
-                    return Err(pingora_core::Error::explain(ErrorType::InternalError, "no backend for host").into());
+                    return Err(pingora_core::Error::explain(
+                        ErrorType::InternalError,
+                        "no backend for host",
+                    )
+                    .into());
                 }
             };
 
@@ -445,41 +442,62 @@ async fn run_pingora_proxy(state: AppState, listen_addr: String, tls_cert_dir: S
     }
 
     // Create the proxy service and add a TCP listener
-    let mut proxy = http_proxy_service(&server.configuration, PorteroProxy { state: state.clone() });
+    let mut proxy = http_proxy_service(
+        &server.configuration,
+        PorteroProxy {
+            state: state.clone(),
+        },
+    );
     // Keep TCP listener for plain HTTP if needed
     proxy.add_tcp(&listen_addr);
     // Initialize TLS cert store and spawn periodic refresh task (30s)
-    let cert_store = Arc::new(RwLock::new(TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default()));
-    tokio::spawn(run_cert_refresh_task(cert_store.clone(), tls_cert_dir.clone(), Duration::from_secs(30)));
+    let cert_store = Arc::new(RwLock::new(
+        TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default(),
+    ));
+    tokio::spawn(run_cert_refresh_task(
+        cert_store.clone(),
+        tls_cert_dir.clone(),
+        Duration::from_secs(30),
+    ));
     // Add a TLS listener using callbacks for SNI selection with default cert fallback
-        let default_sni = {
-            let guard = cert_store.read().await;
-            guard.default_sni.clone()
-        };
+    let default_sni = {
+        let guard = cert_store.read().await;
+        guard.default_sni.clone()
+    };
 
-        if let Some(sni) = default_sni {
-            let cert_path = std::path::Path::new(&tls_cert_dir).join(&sni).join("cert.pem");
-            let key_path = std::path::Path::new(&tls_cert_dir).join(&sni).join("privkey.pem");
-            if cert_path.is_file() && key_path.is_file() {
-                // Use intermediate settings with default cert as a fallback until callbacks are implemented
-                let callbacks: Box<dyn TlsAccept + Send + Sync> =
-                    Box::new(SniCallbacks { cache: cert_store.clone(), default_sni: sni.clone() });
-                let mut tls_settings = tls_settings_with_callbacks(callbacks)?;
-                // Bind a single TLS listener on the same address; Pingora will serve TLS on this port
-                proxy.add_tls_with_settings(&listen_addr, None, tls_settings);
-                info!("TLS listener added with callbacks and default SNI {}", sni);
-            } else {
-                warn!("Default SNI {} missing cert.pem or privkey.pem under {}", sni, tls_cert_dir);
-            }
+    if let Some(sni) = default_sni {
+        let cert_path = std::path::Path::new(&tls_cert_dir)
+            .join(&sni)
+            .join("cert.pem");
+        let key_path = std::path::Path::new(&tls_cert_dir)
+            .join(&sni)
+            .join("privkey.pem");
+        if cert_path.is_file() && key_path.is_file() {
+            // Use intermediate settings with default cert as a fallback until callbacks are implemented
+            let callbacks: Box<dyn TlsAccept + Send + Sync> = Box::new(SniCallbacks {
+                cache: cert_store.clone(),
+                default_sni: sni.clone(),
+            });
+            let tls_settings = tls_settings_with_callbacks(callbacks)?;
+            // Bind a single TLS listener on the same address; Pingora will serve TLS on this port
+            proxy.add_tls_with_settings(&listen_addr, None, tls_settings);
+            info!("TLS listener added with callbacks and default SNI {}", sni);
         } else {
-            warn!("No TLS certs found under {}, TLS listener not added", tls_cert_dir);
+            warn!(
+                "Default SNI {} missing cert.pem or privkey.pem under {}",
+                sni, tls_cert_dir
+            );
         }
+    } else {
+        warn!(
+            "No TLS certs found under {}, TLS listener not added",
+            tls_cert_dir
+        );
+    }
 
     // Add service and run
     server.add_service(proxy);
-    server.run_forever();
-
-    Ok(())
+    server.run_forever()
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -508,7 +526,8 @@ async fn main() -> Result<()> {
     });
 
     // Run Pingora proxy
-    if let Err(e) = run_pingora_proxy(state, cli.listen_addr.clone(), cli.tls_cert_dir.clone()).await
+    if let Err(e) =
+        run_pingora_proxy(state, cli.listen_addr.clone(), cli.tls_cert_dir.clone()).await
     {
         error!("proxy failed to start: {e:?}");
         return Err(e);

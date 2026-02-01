@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 pub mod cert_cache;
 pub mod sni_callbacks;
 
-pub use cert_cache::{CertEntry, TlsCertStore, run_cert_refresh_task};
+pub use cert_cache::{run_cert_refresh_task, TlsCertStore};
 pub use sni_callbacks::SniCallbacks;
 
 /// Build Pingora TLS settings using callbacks, enabling HTTP/2 ALPN.
