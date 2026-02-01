@@ -22,217 +22,17 @@ use pingora_core::protocols::tls::TlsRef;
 use hyper::{Body, Request, Response, Method, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server as HyperServer;
+mod tls;
+mod registry;
+use crate::tls::{SniCallbacks, tls_settings_with_callbacks, run_cert_refresh_task, TlsCertStore};
+use crate::registry::{Backend, Registry};
 
 // TLS certificate store and periodic refresh scaffolding for single SNI-enabled listener.
-#[derive(Debug)]
-struct CertEntry {
-    cert_path: String,
-    key_path: String,
-    cert_mtime: std::time::SystemTime,
-    key_mtime: std::time::SystemTime,
-    cert_hash: u64,
-    key_hash: u64,
-    // Parsed objects cached for per-handshake assignment (no file I/O during handshake)
-    x509_chain: Option<Vec<pingora_core::tls::x509::X509>>,
-    pkey: Option<pingora_core::tls::pkey::PKey<pingora_core::tls::pkey::Private>>,
-}
-
-#[derive(Default)]
-struct TlsCertStore {
-    // hostname (SNI) -> certificate entry metadata and paths
-    entries: HashMap<String, CertEntry>,
-    // optional default SNI hostname to use as fallback
-    default_sni: Option<String>,
-}
-
-impl TlsCertStore {
-    fn load_from_dir(dir: &str) -> Result<Self> {
-        use std::fs;
-        use std::io::BufReader;
-        use std::path::Path;
-
-        let mut entries = HashMap::new();
-        let mut default_sni: Option<String> = None;
-
-        for entry in fs::read_dir(dir).context("reading tls_cert_dir")? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let sni = match path.file_name().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            let cert_path = Path::new(&path).join("cert.pem");
-            let key_path = Path::new(&path).join("privkey.pem");
-            if !cert_path.is_file() || !key_path.is_file() {
-                continue;
-            }
-
-            // Just check presence of cert.pem; no parsing
-                        let cert_exists = cert_path.is_file();
-                        if !cert_exists {
-                            continue;
-                        }
-
-            // Just check presence of privkey.pem; no parsing
-                        let key_exists = key_path.is_file();
-                        if !key_exists {
-                            continue;
-                        }
-
-            if default_sni.is_none() {
-                default_sni = Some(sni.clone());
-            }
-            // We aren't parsing cert/key; store empty placeholders to mark presence
-            // Parse and cache X509 chain and private key from PEM for this SNI
 
 
-            entries.insert(sni, CertEntry {
-                cert_path: cert_path.display().to_string(),
-                key_path: key_path.display().to_string(),
-                cert_mtime: std::time::SystemTime::UNIX_EPOCH,
-                key_mtime: std::time::SystemTime::UNIX_EPOCH,
-                cert_hash: 0,
-                key_hash: 0,
-                x509_chain: None,
-                pkey: None,
-            });
-        }
 
-        Ok(TlsCertStore { entries, default_sni })
-    }
 
-    fn get(&self, sni: &str) -> Option<&CertEntry> {
-        self.entries.get(sni).or_else(|| {
-            self.default_sni
-                .as_ref()
-                .and_then(|d| self.entries.get(d))
-        })
-    }
-}
 
-// Periodic background task to refresh TLS certificates from disk.
-// Intended to be used by a boringssl/openSSL SNI resolver in a single-listener setup.
-async fn run_cert_refresh_task(store: Arc<RwLock<TlsCertStore>>, tls_cert_dir: String, period: Duration) {
-    use std::fs;
-    use std::path::Path;
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-
-    fn hash_bytes(data: &[u8]) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    let mut tick = tokio::time::interval(period);
-    loop {
-        tick.tick().await;
-
-        // Build a new snapshot from disk with mtime/hash metadata
-        let mut new_entries: HashMap<String, CertEntry> = HashMap::new();
-        let mut new_default: Option<String> = None;
-
-        match fs::read_dir(&tls_cert_dir) {
-            Ok(dir_iter) => {
-                for entry_res in dir_iter {
-                    if let Ok(entry) = entry_res {
-                        let path = entry.path();
-                        if !path.is_dir() {
-                            continue;
-                        }
-                        let sni = match path.file_name().and_then(|s| s.to_str()) {
-                            Some(s) => s.to_string(),
-                            None => continue,
-                        };
-                        let cert_path = Path::new(&path).join("cert.pem");
-                        let key_path = Path::new(&path).join("privkey.pem");
-                        if !cert_path.is_file() || !key_path.is_file() {
-                            continue;
-                        }
-                        // Read metadata and content hashes
-                        let cert_meta = match fs::metadata(&cert_path) {
-                            Ok(m) => m,
-                            Err(_) => continue,
-                        };
-                        let key_meta = match fs::metadata(&key_path) {
-                            Ok(m) => m,
-                            Err(_) => continue,
-                        };
-                        let cert_bytes = match fs::read(&cert_path) {
-                            Ok(b) => b,
-                            Err(_) => continue,
-                        };
-                        let key_bytes = match fs::read(&key_path) {
-                            Ok(b) => b,
-                            Err(_) => continue,
-                        };
-                        // Parse and cache X509 chain and private key for this SNI
-                        let parsed_chain = pingora_core::tls::x509::X509::stack_from_pem(&cert_bytes).ok();
-                        let parsed_pkey = pingora_core::tls::pkey::PKey::private_key_from_pem(&key_bytes).ok();
-                        let entry = CertEntry {
-                            cert_path: cert_path.display().to_string(),
-                            key_path: key_path.display().to_string(),
-                            cert_mtime: cert_meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                            key_mtime: key_meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                            cert_hash: hash_bytes(&cert_bytes),
-                            key_hash: hash_bytes(&key_bytes),
-                            x509_chain: parsed_chain,
-                            pkey: parsed_pkey,
-                        };
-                        if new_default.is_none() {
-                            new_default = Some(sni.clone());
-                        }
-                        new_entries.insert(sni, entry);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("TLS cert refresh failed to read dir {}: {}", tls_cert_dir, e);
-                continue;
-            }
-        }
-
-        // Diff and update the cache atomically
-        {
-            let mut guard = store.write().await;
-
-            // Remove entries that no longer exist
-            guard.entries.retain(|sni, _| new_entries.contains_key(sni));
-
-            // Add or update entries whose metadata changed
-            for (sni, new_entry) in new_entries.into_iter() {
-                match guard.entries.get(&sni) {
-                    Some(old) => {
-                        if old.cert_hash != new_entry.cert_hash
-                            || old.key_hash != new_entry.key_hash
-                            || old.cert_mtime != new_entry.cert_mtime
-                            || old.key_mtime != new_entry.key_mtime
-                            || old.cert_path != new_entry.cert_path
-                            || old.key_path != new_entry.key_path
-                        {
-                            guard.entries.insert(sni.clone(), new_entry);
-                            info!("TLS cert cache updated for SNI {}", sni);
-                        }
-                    }
-                    None => {
-                        guard.entries.insert(sni.clone(), new_entry);
-                        info!("TLS cert cache added for SNI {}", sni);
-                    }
-                }
-            }
-
-            // Update default SNI if not set
-            if guard.default_sni.is_none() {
-                guard.default_sni = new_default;
-            }
-        }
-
-        info!("TLS cert store refresh cycle completed for {}", tls_cert_dir);
-    }
-}
 
 /// NOTE:
 /// This file provides a minimal skeleton for a Pingora-based reverse proxy service
@@ -285,96 +85,17 @@ struct RegisterClaims {
 }
 
 /// Backend endpoint for a service.
-#[derive(Debug, Clone)]
-struct Backend {
-    /// IPv6 address of the backend (no brackets in registration payload)
-    addr_v6: Ipv6Addr,
-    /// Port where the backend listens
-    port: u16,
-    /// When this registration expires
-    expires_at: Instant,
-}
+// Moved to module: see `registry::models::Backend`
 
-impl Backend {
-    fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.addr_v6.into(), self.port)
-    }
 
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
-    }
-}
+// Moved to module: see `registry::models::Backend` methods `socket_addr` and `is_expired`
 
 /// Runtime state for routing and registration.
-/// Maps host -> service_name -> round-robin queue of backends.
-#[derive(Debug, Default)]
-struct Registry {
-    /// Host header -> service_name -> queue of backends
-    hosts: HashMap<String, HashMap<String, VecDeque<Backend>>>,
-}
+// Moved to module: see `registry::models::Registry`
 
-impl Registry {
-    /// Register or update a backend for the given host and service_name, with TTL.
-    fn upsert_backend(
-        &mut self,
-        host: &str,
-        service_name: &str,
-        addr_v6: Ipv6Addr,
-        port: u16,
-        ttl_seconds: u64,
-    ) {
-        let expires_at = Instant::now() + Duration::from_secs(ttl_seconds);
-        let entry = self
-            .hosts
-            .entry(host.to_string())
-            .or_default()
-            .entry(service_name.to_string())
-            .or_default();
 
-        // Replace if exists, else push; keep queue order stable.
-        if let Some(existing_pos) = entry.iter().position(|b| b.addr_v6 == addr_v6 && b.port == port)
-        {
-            entry[existing_pos].expires_at = expires_at;
-        } else {
-            entry.push_back(Backend {
-                addr_v6,
-                port,
-                expires_at,
-            });
-        }
-    }
 
-    /// Take next backend using round-robin. Expired backends are pruned opportunistically.
-    fn next_backend(&mut self, host: &str, service_name: &str) -> Option<Backend> {
-        let svc_map = self.hosts.get_mut(host)?;
-        let queue = svc_map.get_mut(service_name)?;
-        // Drop expired backends first
-        queue.retain(|b| !b.is_expired());
-        if queue.is_empty() {
-            return None;
-        }
-        // Round-robin: pop front and push back
-        if let Some(b) = queue.pop_front() {
-            let ret = b.clone();
-            queue.push_back(b);
-            Some(ret)
-        } else {
-            None
-        }
-    }
 
-    /// Remove expired backends from all services.
-    fn purge_expired(&mut self) {
-        let now = Instant::now();
-        self.hosts.retain(|_host, svc_map| {
-            svc_map.retain(|_svc, queue| {
-                queue.retain(|b| b.expires_at > now);
-                !queue.is_empty()
-            });
-            !svc_map.is_empty()
-        });
-    }
-}
 
 /// Shared application state held behind Arc<RwLock<...>>.
 #[derive(Clone)]
@@ -512,12 +233,17 @@ async fn handle_register(
     // Update registry
     {
         let mut reg = state.registry.write().await;
+        let backend = Backend {
+            addr_v6,
+            port: payload.port,
+            // expires_at is computed inside upsert_backend; placeholder value here
+            expires_at: Instant::now(),
+        };
         reg.upsert_backend(
             &payload.service_name, // primary routing by Host header, but associate service_name
             &payload.service_name,
-            addr_v6,
-            payload.port,
-            payload.ttl_seconds,
+            backend,
+            Duration::from_secs(payload.ttl_seconds),
         );
     }
 
@@ -650,50 +376,11 @@ async fn run_registration_api(state: AppState, register_addr: String) -> Result<
 /* configure_pingora_tls removed: rustls-specific helper is no longer needed with BoringSSL/OpenSSL.
    TLS listener configuration now uses TlsSettings::intermediate with PEM paths directly. */
 
-struct SniCallbacks {
-    cache: Arc<RwLock<TlsCertStore>>,
-    default_sni: String,
-}
 
-#[async_trait]
-impl TlsAccept for SniCallbacks {
-    async fn certificate_callback(&self, ssl: &mut TlsRef) -> () {
-        // Try to get the requested SNI hostname; fall back to default if unavailable
-        // Read requested SNI hostname (BoringSSL/OpenSSL via Pingora)
-        let sni = ssl.servername(pingora_core::tls::ssl::NameType::HOST_NAME).unwrap_or(&self.default_sni).to_string();
 
-        // Read current cache snapshot
-        let cache = self.cache.read().await;
 
-        // Choose entry: SNI or default
-        let chosen = cache.entries.get(&sni).or_else(|| {
-            cache
-                .default_sni
-                .as_ref()
-                .and_then(|d| cache.entries.get(d))
-        });
 
-        if let Some(entry) = chosen {
-            // Apply certificate and private key from cached file paths
-            // These APIs are provided by Pingora's TlsRef for boringssl/openssl backends.
-            // Apply cached X509 chain and private key to the ongoing handshake
-            if let (Some(chain), Some(pkey)) = (entry.x509_chain.as_ref(), entry.pkey.as_ref()) {
-                // Attach certificate and private key using Pingora TLS ext helpers
-                if let Some(leaf) = chain.first() {
-                    let _ = pingora_core::tls::ext::ssl_use_certificate(ssl, leaf);
-                }
-                let _ = pingora_core::tls::ext::ssl_use_private_key(ssl, pkey);
-            }
-        }
-    }
 
-    async fn handshake_complete_callback(
-        &self,
-        _ssl: &TlsRef,
-    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        None
-    }
-}
 
 /// Start the Pingora-based proxy service.
 ///
@@ -777,9 +464,7 @@ async fn run_pingora_proxy(state: AppState, listen_addr: String, tls_cert_dir: S
                 // Use intermediate settings with default cert as a fallback until callbacks are implemented
                 let callbacks: Box<dyn TlsAccept + Send + Sync> =
                     Box::new(SniCallbacks { cache: cert_store.clone(), default_sni: sni.clone() });
-                let mut tls_settings = pingora_core::listeners::tls::TlsSettings::with_callbacks(callbacks)
-                    .map_err(|e| anyhow!("failed to build TLS settings with callbacks: {e}"))?;
-                tls_settings.enable_h2();
+                let mut tls_settings = tls_settings_with_callbacks(callbacks)?;
                 // Bind a single TLS listener on the same address; Pingora will serve TLS on this port
                 proxy.add_tls_with_settings(&listen_addr, None, tls_settings);
                 info!("TLS listener added with callbacks and default SNI {}", sni);
