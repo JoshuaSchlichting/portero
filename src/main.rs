@@ -1,11 +1,13 @@
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use clap::Parser;
+use env_logger;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use log::{error, info, warn};
 use pingora_core::listeners::TlsAccept;
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -15,8 +17,6 @@ use pingora_proxy::{ProxyHttp, Session};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::time::interval;
-use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server as HyperServer;
@@ -115,6 +115,7 @@ struct RegisterPayload {
     host: String, // IPv6 address (no brackets)
     port: u16,
     ttl_seconds: u64,
+    use_tls: bool,
 }
 
 /// Validate registration auth via shared secret and JWT (HS256).
@@ -215,18 +216,19 @@ async fn handle_register(
         return Ok(resp);
     }
 
-    // Validate IPv6 address format
-    let addr_v6: Ipv6Addr = payload
+    // Validate IP address format (IPv4 or IPv6)
+    let addr: IpAddr = payload
         .host
         .parse()
-        .context("host must be a valid IPv6 address")?;
+        .context("host must be a valid IP address")?;
 
     // Update registry
     {
         let mut reg = state.registry.write().await;
         let backend = Backend {
-            addr_v6,
+            addr,
             port: payload.port,
+            use_tls: payload.use_tls,
             // expires_at is computed inside upsert_backend; placeholder value here
             expires_at: Instant::now(),
         };
@@ -302,7 +304,30 @@ async fn run_registration_api(state: AppState, register_addr: String) -> Result<
                 Ok::<_, anyhow::Error>(service_fn(move |req: Request<Body>| {
                     let state = state.clone();
                     async move {
-                        if req.method() == Method::POST && req.uri().path() == "/register" {
+                        if req.method() == Method::GET && req.uri().path() == "/health" {
+                            // Simple health check: returns 200 OK
+                            let resp = Response::new(Body::from("ok"));
+                            Ok::<_, anyhow::Error>(resp)
+                        } else if req.method() == Method::GET && req.uri().path() == "/metrics" {
+                            // Basic Prometheus-style metrics for registry
+                            let reg = state.registry.read().await;
+                            let mut host_count = 0usize;
+                            let mut service_count = 0usize;
+                            let mut backend_count = 0usize;
+                            for (_host, services) in reg.hosts.iter() {
+                                host_count += 1;
+                                for (_svc, queue) in services.iter() {
+                                    service_count += 1;
+                                    backend_count += queue.len();
+                                }
+                            }
+                            let metrics = format!(
+                                "portero_registry_hosts {}\nportero_registry_services {}\nportero_registry_backends {}\n",
+                                host_count, service_count, backend_count
+                            );
+                            let resp = Response::new(Body::from(metrics));
+                            Ok::<_, anyhow::Error>(resp)
+                        } else if req.method() == Method::POST && req.uri().path() == "/register" {
                             // Extract headers
                             let (parts, body_stream) = req.into_parts();
                             let headers = parts.headers;
@@ -429,8 +454,18 @@ fn run_pingora_proxy(
                 }
             };
 
-            // Upstream uses HTTP (no TLS) to IPv6 backend
-            let peer = Box::new(HttpPeer::new(backend.socket_addr(), false, host.clone()));
+            // Upstream may use TLS (HTTPS) to IPv6 backend with SNI set to Host, based on registration
+            let mut peer = Box::new(HttpPeer::new(
+                backend.socket_addr(),
+                backend.use_tls,
+                host.clone(),
+            ));
+
+            // Disable certificate verification for upstream TLS connections (self-signed certs)
+            if backend.use_tls {
+                peer.options.verify_cert = false;
+            }
+
             Ok(peer)
         }
 
@@ -456,8 +491,6 @@ fn run_pingora_proxy(
             state: state.clone(),
         },
     );
-    // Don't add TCP listener - we'll use TLS listener only
-    // proxy.add_tcp(&listen_addr);
     // Initialize TLS cert store
     let cert_store = Arc::new(RwLock::new(
         TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default(),
@@ -554,8 +587,7 @@ fn run_pingora_proxy(
 
 fn main() -> Result<()> {
     // Logging
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("PORTERO_LOG", "info"))
         .init();
 
     // CLI

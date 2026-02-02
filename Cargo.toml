@@ -21,6 +21,8 @@ clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+log = "0.4"
+env_logger = "0.10"
 
 # Serialization for JSON payloads
 serde = { version = "1", features = ["derive"] }

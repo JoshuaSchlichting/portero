@@ -1,0 +1,173 @@
+# Docker Compose stack to run:
+# - Portero (reverse proxy + registration API)
+# - mock-backend (simple IPv6-enabled HTTP server)
+# - portero-agent (registers the backend with Portero and renews periodically)
+# - mock-backend-2 (second backend for round-robin)
+# - portero-agent-2 (registers the second backend)
+#
+# Assumptions:
+# - This file lives in the examples/ directory of the Portero repo.
+# - Portero Dockerfile is in the parent directory (../).
+# - Mock backend is at ./mock-backend with its own Cargo project.
+# - The portero-agent repo exists at ../../portero-agent with its own Dockerfile.
+# - TLS certs for Portero are placed under ../certs/<sni>/{cert.pem,privkey.pem}
+#
+# Usage:
+#   docker compose up --build
+#
+# Testing:
+#   - curl -k --resolve example.com:443:127.0.0.1 https://example.com/
+#   - curl -H "Host: example.com" http://127.0.0.1:8080/  (if HTTP listener is exposed)
+#
+# Notes:
+# - For local testing, you can expose Portero's HTTP listener (8080) if enabled in the binary.
+# - Registration API (18080) is exposed for visibility; in production, firewall it to backend hosts.
+# - The agent uses PORTERO_IPV6=::1 by default (inside the container). For realistic IPv6 scenarios,
+#   configure Docker daemon IPv6 or test on VMs.
+
+services:
+  portero:
+    image: portero:latest
+    container_name: portero
+    environment:
+      PORTERO_LOG: info
+      LISTEN_ADDR: 0.0.0.0:443
+      REGISTER_ADDR: 0.0.0.0:18080
+      TLS_CERT_DIR: /etc/portero/certs
+      REGISTER_SECRET: changeme
+      JWT_HMAC_KEY: changeme
+    volumes:
+      - ../certs:/etc/portero/certs:ro
+    ports:
+      - "443:443" # TLS listener
+      - "18080:18080" # registration API
+      - "8080:8080" # optional: HTTP listener for local tests (only if enabled in Portero)
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.10
+    restart: unless-stopped
+
+  mock-backend:
+    image: mock-backend:latest
+    container_name: mock-backend
+    environment:
+      MOCK_BACKEND_LOG: info
+      MOCK_BACKEND_ADDR: "[::]:8080"
+    ports:
+      - "8081:8080" # host access for debugging the backend directly
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.2
+    restart: unless-stopped
+
+  portero-agent:
+    image: portero-agent:latest
+    container_name: portero-agent
+    depends_on:
+      - portero
+      - mock-backend
+    environment:
+      PORTERO_AGENT_LOG: info
+      PORTERO_REGISTER_URL: http://portero:18080/register
+      PORTERO_SERVICE_NAME: example.com
+      PORTERO_IP: 172.20.0.2
+      PORTERO_IFACE: "" # leave empty to skip autodiscovery in containers
+      PORTERO_PORT: 8080
+      PORTERO_USE_TLS: "false"
+      PORTERO_TTL_SECONDS: 3600
+      PORTERO_REGISTER_SECRET: changeme
+      PORTERO_JWT_HMAC_KEY: changeme
+      PORTERO_RENEWAL_FRACTION: 0.7
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.11
+    restart: unless-stopped
+
+  mock-backend-2:
+    image: mock-backend:latest
+    container_name: mock-backend-2
+    environment:
+      MOCK_BACKEND_LOG: info
+      MOCK_BACKEND_ADDR: "[::]:8080"
+    ports:
+      - "8082:8080" # host access for debugging the second backend directly
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.3
+    restart: unless-stopped
+
+  portero-agent-2:
+    image: portero-agent:latest
+    container_name: portero-agent-2
+    depends_on:
+      - portero
+      - mock-backend-2
+    environment:
+      PORTERO_AGENT_LOG: info
+      PORTERO_REGISTER_URL: http://portero:18080/register
+      PORTERO_SERVICE_NAME: example.com
+      PORTERO_IP: 172.20.0.3
+      PORTERO_IFACE: "" # leave empty to skip autodiscovery in containers
+      PORTERO_PORT: 8080
+      PORTERO_USE_TLS: "false"
+      PORTERO_TTL_SECONDS: 3600
+      PORTERO_REGISTER_SECRET: changeme
+      PORTERO_JWT_HMAC_KEY: changeme
+      PORTERO_RENEWAL_FRACTION: 0.7
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.12
+    restart: unless-stopped
+
+  mock-backend-https:
+    image: nginx:alpine
+    container_name: mock-backend-https
+    volumes:
+      - ../certs/secure.example.com:/etc/nginx/certs:ro
+    command: |
+      sh -c "mkdir -p /usr/share/nginx/html &&
+             echo 'hello from HTTPS backend (mock-backend-https)' > /usr/share/nginx/html/index.html &&
+             echo 'server {
+               listen 8443 ssl;
+               server_name secure.example.com;
+               ssl_certificate /etc/nginx/certs/cert.pem;
+               ssl_certificate_key /etc/nginx/certs/privkey.pem;
+               location / {
+                 root /usr/share/nginx/html;
+               }
+             }' > /etc/nginx/conf.d/default.conf &&
+             nginx -g 'daemon off;'"
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.5
+    restart: unless-stopped
+
+  portero-agent-https:
+    image: portero-agent:latest
+    container_name: portero-agent-https
+    depends_on:
+      - portero
+      - mock-backend-https
+    environment:
+      PORTERO_AGENT_LOG: info
+      PORTERO_REGISTER_URL: http://portero:18080/register
+      PORTERO_SERVICE_NAME: secure.example.com
+      PORTERO_IP: 172.20.0.5
+      PORTERO_IFACE: ""
+      PORTERO_PORT: 8443
+      PORTERO_USE_TLS: "true"
+      PORTERO_TTL_SECONDS: 3600
+      PORTERO_REGISTER_SECRET: changeme
+      PORTERO_JWT_HMAC_KEY: changeme
+      PORTERO_RENEWAL_FRACTION: 0.7
+    networks:
+      portero_net:
+        ipv4_address: 172.20.0.13
+    restart: unless-stopped
+
+networks:
+  portero_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

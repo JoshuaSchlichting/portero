@@ -1,0 +1,56 @@
+[Unit]
+Description=Portero Reverse Proxy Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Run as non-root where possible; ensure user/group exist and have access to certs dir
+User=portero
+Group=portero
+
+# Environment configuration
+# Optionally provide an environment file at /etc/portero/portero.env
+# with variables like REGISTER_SECRET, JWT_HMAC_KEY, etc.
+EnvironmentFile=-/etc/portero/portero.env
+
+# Defaults (can be overridden via EnvironmentFile or drop-in)
+Environment=PORTERO_LOG=info
+Environment=LISTEN_ADDR=0.0.0.0:443
+Environment=REGISTER_ADDR=0.0.0.0:18080
+Environment=TLS_CERT_DIR=/etc/portero/certs
+
+# REQUIRED secrets - override in EnvironmentFile or drop-in configs
+Environment=REGISTER_SECRET=changeme
+Environment=JWT_HMAC_KEY=changeme
+
+# Binary path (ensure installed, e.g., /usr/local/bin/portero)
+ExecStart=/usr/local/bin/portero \
+    --listen-addr ${LISTEN_ADDR} \
+    --register-addr ${REGISTER_ADDR} \
+    --tls-cert-dir ${TLS_CERT_DIR} \
+    --register-secret ${REGISTER_SECRET} \
+    --jwt-hmac-key ${JWT_HMAC_KEY}
+
+# Restart strategy
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits and hardening (tune as needed)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Ensure certs directory is readable by the service user
+ReadWritePaths=/etc/portero/certs
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,23 +1,25 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 /// A backend endpoint for a service.
 ///
-/// - `addr_v6`: IPv6 address of the backend (no brackets)
+/// - `addr`: IP address of the backend (IPv4 or IPv6)
 /// - `port`: TCP port on which the backend listens
+/// - `use_tls`: whether to use TLS (HTTPS) when connecting upstream
 /// - `expires_at`: time when this registration expires; used for TTL and purging
 #[derive(Debug, Clone)]
 pub struct Backend {
-    pub addr_v6: Ipv6Addr,
+    pub addr: IpAddr,
     pub port: u16,
+    pub use_tls: bool,
     pub expires_at: Instant,
 }
 
 impl Backend {
     /// Construct a `SocketAddr` for connecting to this backend.
     pub fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.addr_v6.into(), self.port)
+        SocketAddr::new(self.addr, self.port)
     }
 
     /// Return true if the backend registration has expired.
@@ -45,8 +47,9 @@ impl Registry {
     ) {
         let expires_at = Instant::now() + ttl;
         let backend = Backend {
-            addr_v6: backend.addr_v6,
+            addr: backend.addr,
             port: backend.port,
+            use_tls: backend.use_tls,
             expires_at,
         };
         let services = self.hosts.entry(host.to_string()).or_default();

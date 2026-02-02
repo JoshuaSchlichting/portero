@@ -13,10 +13,10 @@ Key features
 ## TLS certificates
 
 Portero scans a directory for per-domain certificate folders:
-- Default path: `~/.loadmaster/certs`
+- Recommended path: `/etc/portero/certs`
 - Layout:
-  - `~/.loadmaster/certs/<domainRoot>/cert.pem`
-  - `~/.loadmaster/certs/<domainRoot>/privkey.pem`
+  - `/etc/portero/certs/<sni>/cert.pem`
+  - `/etc/portero/certs/<sni>/privkey.pem`
 
 Notes
 - The first discovered domain becomes the default SNI fallback.
@@ -40,6 +40,7 @@ A small internal HTTP endpoint is used to register backends dynamically:
   - `host` (IPv6 address without brackets)
   - `port` (u16)
   - `ttl_seconds` (u64)
+  - `use_tls` (bool) — whether to use HTTPS for upstream connections
 
 Behavior
 - On success, the backend is inserted/updated and will be served for its `service_name` (by Host).
@@ -51,9 +52,9 @@ Why both secret and JWT?
 
 ## Upstream proxying
 
-- Requests are proxied upstream over TLS (HTTPS).
-- Upstream SNI is set to the incoming Host header.
-- HTTP/2/H1 to clients is handled via ALPN; upstream behavior is configured per `HttpPeer` (HTTPS enabled).
+- Requests are proxied upstream either over TLS (HTTPS) or plain HTTP, based on the per-backend `use_tls` flag.
+- When using TLS, upstream SNI is set to the incoming Host header.
+- HTTP/2/H1 to clients is handled via ALPN; upstream behavior is configured per `HttpPeer`.
 
 ## Build and run
 
@@ -65,13 +66,13 @@ This project uses upstream Pingora from GitHub with the BoringSSL backend enable
   - `cargo build` (debug) or `cargo build --release`
 - Run (example):
   - Binary flags:
-    - `--listen-addr 0.0.0.0:443`
-    - `--register-addr 127.0.0.1:8080`
-    - `--tls-cert-dir $HOME/.loadmaster/certs`
+    - `--listen-addr 0.0.0.0:443` (TLS) or `--listen-addr 0.0.0.0:8080` (plain HTTP for local testing)
+    - `--register-addr 127.0.0.1:18080`
+    - `--tls-cert-dir /etc/portero/certs`
     - `--register-secret <secret>`
     - `--jwt-hmac-key <hs256-key>`
   - Example:
-    - `./target/debug/portero --listen-addr 0.0.0.0:443 --register-addr 127.0.0.1:8080 --tls-cert-dir $HOME/.loadmaster/certs --register-secret changeme --jwt-hmac-key changeme`
+    - `./target/debug/portero --listen-addr 0.0.0.0:443 --register-addr 127.0.0.1:18080 --tls-cert-dir /etc/portero/certs --register-secret changeme --jwt-hmac-key changeme`
 
 Quick test
 - Prepare certs for two domains:

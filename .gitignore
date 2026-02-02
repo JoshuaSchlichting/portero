@@ -1,1 +1,5 @@
 target/
+
+# Test certificates (self-signed, not for production)
+certs/
+*.pem

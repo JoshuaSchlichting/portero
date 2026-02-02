@@ -1,0 +1,12 @@
+[package]
+name = "mock-backend"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Simple IPv6-enabled HTTP mock backend for Portero Compose testing"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+hyper = { version = "0.14", features = ["full"] }
+log = "0.4"
+env_logger = "0.10"
