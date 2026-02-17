@@ -1,5 +1,24 @@
 # Portero
 
+## Nightly Docker image (GHCR)
+
+For early testing, you can pull and run the latest nightly container image from GitHub Container Registry (GHCR).
+
+Pull the nightly image:
+
+- `docker pull ghcr.io/JoshuaSchlichting/portero:nightly`
+
+Run it (recommended for Linux performance testing: host networking):
+
+- `docker run --rm --network host ghcr.io/JoshuaSchlichting/portero:nightly --help`
+
+Notes:
+- Replace `JoshuaSchlichting/portero` with your GitHub repository (for example: `ghcr.io/joshuaschlichting/portero:nightly`).
+- If the image is private, you must authenticate first:
+  - `echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin`
+- The `nightly` tag is intentionally moving and will be overwritten on each push to the default branch.
+
+
 Portero is a reverse proxy written in Rust on top of Cloudflare’s Pingora framework. It terminates TLS, supports HTTP/1.1 and HTTP/2 (via ALPN), proxies to upstream backends over TLS with SNI, and provides a simple registration API to dynamically add backends at runtime.
 Status: Pre-1.0 (experimental) — not production-ready until 1.0.
 
