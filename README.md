@@ -6,14 +6,13 @@ For early testing, you can pull and run the latest nightly container image from 
 
 Pull the nightly image:
 
-- `docker pull ghcr.io/JoshuaSchlichting/portero:nightly`
+- `docker pull ghcr.io/joshuaschlichting/portero:nightly`
 
 Run it (recommended for Linux performance testing: host networking):
 
-- `docker run --rm --network host ghcr.io/JoshuaSchlichting/portero:nightly --help`
+- `docker run --rm --network host ghcr.io/joshuaschlichting/portero:nightly --help`
 
 Notes:
-- Replace `JoshuaSchlichting/portero` with your GitHub repository (for example: `ghcr.io/joshuaschlichting/portero:nightly`).
 - If the image is private, you must authenticate first:
   - `echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin`
 - The `nightly` tag is intentionally moving and will be overwritten on each push to the default branch.

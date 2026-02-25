@@ -65,6 +65,10 @@ struct Cli {
     /// JWT HMAC key for validating registration requests (HS256)
     #[arg(long)]
     jwt_hmac_key: String,
+
+    /// Disable TLS and run plain HTTP proxy (for testing/development)
+    #[arg(long, default_value_t = false)]
+    no_tls: bool,
 }
 
 /// Claims expected in the JWT used for registration auth.
@@ -401,6 +405,7 @@ fn run_pingora_proxy(
     listen_addr: String,
     tls_cert_dir: String,
     register_addr: String,
+    no_tls: bool,
 ) -> Result<()> {
     info!("Proxy listening (TCP) on {}", listen_addr);
 
@@ -420,25 +425,34 @@ fn run_pingora_proxy(
         state: AppState,
     }
 
+    /// Per-request context for logging and metrics
+    struct RequestCtx {
+        start_time: Instant,
+    }
+
     #[async_trait]
     impl ProxyHttp for PorteroProxy {
-        type CTX = ();
+        type CTX = RequestCtx;
 
         fn new_ctx(&self) -> Self::CTX {
-            ()
+            RequestCtx {
+                start_time: Instant::now(),
+            }
         }
 
         async fn upstream_peer(
             &self,
-            _session: &mut Session,
+            session: &mut Session,
             _ctx: &mut Self::CTX,
         ) -> pingora_core::Result<Box<HttpPeer>> {
-            // NOTE: For simplicity, map Host -> service_name equal to Host.
-            // If Host is missing, use empty string; registry lookup will fail gracefully.
-            let host = _session
+            // Get Host from the Host header (HTTP/1.1) or :authority pseudo-header (HTTP/2)
+            // The URI's host() is only set for absolute URIs, not typical relative requests
+            let host = session
                 .req_header()
-                .uri
-                .host()
+                .headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|h| h.split(':').next().unwrap_or(h)) // Strip port if present
                 .unwrap_or_default()
                 .to_string();
 
@@ -471,16 +485,59 @@ fn run_pingora_proxy(
 
         async fn upstream_request_filter(
             &self,
-            _session: &mut Session,
+            session: &mut Session,
             upstream_request: &mut pingora_http::RequestHeader,
             _ctx: &mut Self::CTX,
         ) -> pingora_core::Result<()> {
             // Ensure Host header is present upstream if client provided one
-            if let Some(host_val) = _session.req_header().uri.host() {
+            if let Some(host_val) = session.req_header().headers.get("host") {
                 // Insert or overwrite Host header upstream
-                upstream_request.insert_header("Host", host_val).ok();
+                if let Ok(host_str) = host_val.to_str() {
+                    upstream_request.insert_header("Host", host_str).ok();
+                }
             }
             Ok(())
+        }
+
+        async fn logging(
+            &self,
+            session: &mut Session,
+            e: Option<&pingora_core::Error>,
+            ctx: &mut Self::CTX,
+        ) {
+            let elapsed = ctx.start_time.elapsed();
+            let method = session.req_header().method.as_str();
+            let path = session.req_header().uri.path();
+            let host = session
+                .req_header()
+                .headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+
+            // Get response status if available
+            let status = session
+                .response_written()
+                .map(|resp| resp.status.as_u16())
+                .unwrap_or(0);
+
+            // Get client address
+            let client_addr = session
+                .client_addr()
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "-".to_string());
+
+            if let Some(err) = e {
+                warn!(
+                    "{} - {} {} {} - {} - {:?} - error: {}",
+                    client_addr, method, host, path, status, elapsed, err
+                );
+            } else {
+                info!(
+                    "{} - {} {} {} - {} - {:?}",
+                    client_addr, method, host, path, status, elapsed
+                );
+            }
         }
     }
 
@@ -503,7 +560,11 @@ fn run_pingora_proxy(
         store.default_sni.clone()
     };
 
-    if let Some(sni) = default_sni {
+    if no_tls {
+        // Plain HTTP mode - add TCP listener without TLS
+        proxy.add_tcp(&listen_addr);
+        info!("Plain HTTP listener added on {}", listen_addr);
+    } else if let Some(sni) = default_sni {
         let cert_path = std::path::Path::new(&tls_cert_dir)
             .join(&sni)
             .join("cert.pem");
@@ -602,5 +663,6 @@ fn main() -> Result<()> {
         cli.listen_addr.clone(),
         cli.tls_cert_dir.clone(),
         cli.register_addr.clone(),
+        cli.no_tls,
     )
 }

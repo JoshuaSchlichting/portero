@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Cached certificate entry for an SNI hostname.
 /// - Stores PEM paths and metadata for change detection
@@ -74,16 +74,17 @@ impl TlsCertStore {
             );
         }
 
-        Ok(TlsCertStore { entries, default_sni })
+        Ok(TlsCertStore {
+            entries,
+            default_sni,
+        })
     }
 
     /// Get the cert entry for a given SNI, falling back to default if not found.
     pub fn get(&self, sni: &str) -> Option<&CertEntry> {
-        self.entries.get(sni).or_else(|| {
-            self.default_sni
-                .as_ref()
-                .and_then(|d| self.entries.get(d))
-        })
+        self.entries
+            .get(sni)
+            .or_else(|| self.default_sni.as_ref().and_then(|d| self.entries.get(d)))
     }
 }
 
@@ -156,12 +157,8 @@ pub async fn run_cert_refresh_task(
                         let entry = CertEntry {
                             cert_path: cert_path.display().to_string(),
                             key_path: key_path.display().to_string(),
-                            cert_mtime: cert_meta
-                                .modified()
-                                .unwrap_or(SystemTime::UNIX_EPOCH),
-                            key_mtime: key_meta
-                                .modified()
-                                .unwrap_or(SystemTime::UNIX_EPOCH),
+                            cert_mtime: cert_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                            key_mtime: key_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                             cert_hash: hash_bytes(&cert_bytes),
                             key_hash: hash_bytes(&key_bytes),
                             x509_chain: parsed_chain,
@@ -176,7 +173,10 @@ pub async fn run_cert_refresh_task(
                 }
             }
             Err(e) => {
-                warn!("TLS cert refresh failed to read dir {}: {}", tls_cert_dir, e);
+                warn!(
+                    "TLS cert refresh failed to read dir {}: {}",
+                    tls_cert_dir, e
+                );
                 continue;
             }
         }
@@ -216,7 +216,10 @@ pub async fn run_cert_refresh_task(
             }
         }
 
-        info!("TLS cert store refresh cycle completed for {}", tls_cert_dir);
+        debug!(
+            "TLS cert store refresh cycle completed for {}",
+            tls_cert_dir
+        );
     }
 }
 

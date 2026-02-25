@@ -9,7 +9,6 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::json;
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
@@ -38,8 +37,9 @@ async fn test_register_and_route_http_backend() {
     let http_addr = spawn_http_backend().await;
 
     // 2) Start Portero proxy and registration API
-    let listen_addr = "127.0.0.1:8080"; // HTTP listener (Pingora TCP listener added for tests)
-    let register_addr = "127.0.0.1:18080";
+    // Use high ports to avoid conflict with system portero service
+    let listen_addr = "127.0.0.1:19080";
+    let register_addr = "127.0.0.1:19081";
     let tls_cert_dir = "./tests/data/certs"; // TODO: populate with default SNI certs for the proxy
     let (mut portero_child, _cleanup_token) =
         spawn_portero(listen_addr, register_addr, tls_cert_dir).await;
@@ -78,8 +78,9 @@ async fn test_register_and_route_https_backend() {
     // let https_addr = spawn_https_backend().await;
 
     // 2) Start Portero proxy and registration API
-    let listen_addr = "127.0.0.1:8443";
-    let register_addr = "127.0.0.1:18080";
+    // Use high ports to avoid conflict with system portero service
+    let listen_addr = "127.0.0.1:19443";
+    let register_addr = "127.0.0.1:19082";
     let tls_cert_dir = "./tests/data/certs"; // TODO: populate with default SNI certs for the proxy
     let (mut portero_child, _cleanup_token) =
         spawn_portero(listen_addr, register_addr, tls_cert_dir).await;
@@ -151,6 +152,7 @@ async fn spawn_portero(listen_addr: &str, register_addr: &str, tls_cert_dir: &st
         .arg("test-secret")
         .arg("--jwt-hmac-key")
         .arg("test-hmac-key")
+        .arg("--no-tls")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
