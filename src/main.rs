@@ -245,12 +245,17 @@ async fn handle_register(
             expires_at: Instant::now(),
         };
         reg.upsert_backend(
-            &payload.service_name, // primary routing by Host header, but associate service_name
+            &payload.service_name,
             &payload.service_name,
             backend,
             Duration::from_secs(payload.ttl_seconds),
         );
     }
+
+    info!(
+        "Registered backend {}:{} for service '{}' (tls={}, ttl={}s)",
+        addr, payload.port, payload.service_name, payload.use_tls, payload.ttl_seconds
+    );
 
     let resp = http::Response::builder()
         .status(http::StatusCode::OK)
