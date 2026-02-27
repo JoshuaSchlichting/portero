@@ -8,32 +8,28 @@ use pingora_core::protocols::tls::TlsRef;
 
 use crate::tls::cert_cache::TlsCertStore;
 
-/// SNI callback that assigns certificate/key during the handshake from the cache.
-/// This avoids per-handshake file I/O by using parsed, cached X509 chain and PKey.
 pub struct SniCallbacks {
     pub cache: Arc<RwLock<TlsCertStore>>,
-    pub default_sni: String,
 }
 
 #[async_trait]
 impl TlsAccept for SniCallbacks {
     async fn certificate_callback(&self, ssl: &mut TlsRef) -> () {
-        // Read requested SNI hostname, defaulting if none is provided
-        let sni = ssl
-            .servername(pingora_core::tls::ssl::NameType::HOST_NAME)
-            .unwrap_or(&self.default_sni)
-            .to_string();
-
-        // Snapshot the cache
         let cache = self.cache.read().await;
 
-        // Choose entry for SNI or default
-        let chosen = cache.entries.get(&sni).or_else(|| {
-            cache
-                .default_sni
-                .as_ref()
-                .and_then(|d| cache.entries.get(d))
-        });
+        let requested_sni = ssl
+            .servername(pingora_core::tls::ssl::NameType::HOST_NAME)
+            .map(|s| s.to_string());
+
+        let chosen = requested_sni
+            .as_ref()
+            .and_then(|sni| cache.entries.get(sni))
+            .or_else(|| {
+                cache
+                    .default_sni
+                    .as_ref()
+                    .and_then(|d| cache.entries.get(d))
+            });
 
         if let Some(entry) = chosen {
             // Attach cached certificate and private key to the ongoing handshake

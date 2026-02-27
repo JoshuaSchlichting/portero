@@ -700,45 +700,16 @@ fn run_pingora_proxy(
         TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default(),
     ));
 
-    // Add a TLS listener using callbacks for SNI selection with default cert fallback
-    let default_sni = {
-        // Get the default SNI from the loaded cert store
-        let store = TlsCertStore::load_from_dir(&tls_cert_dir).unwrap_or_default();
-        store.default_sni.clone()
-    };
-
     if no_tls {
-        // Plain HTTP mode - add TCP listener without TLS
         proxy.add_tcp(&listen_addr);
         info!("Plain HTTP listener added on {}", listen_addr);
-    } else if let Some(sni) = default_sni {
-        let cert_path = std::path::Path::new(&tls_cert_dir)
-            .join(&sni)
-            .join("cert.pem");
-        let key_path = std::path::Path::new(&tls_cert_dir)
-            .join(&sni)
-            .join("privkey.pem");
-        if cert_path.is_file() && key_path.is_file() {
-            // Use intermediate settings with default cert as a fallback until callbacks are implemented
-            let callbacks: Box<dyn TlsAccept + Send + Sync> = Box::new(SniCallbacks {
-                cache: cert_store.clone(),
-                default_sni: sni.clone(),
-            });
-            let tls_settings = tls_settings_with_callbacks(callbacks)?;
-            // Bind a single TLS listener on the same address; Pingora will serve TLS on this port
-            proxy.add_tls_with_settings(&listen_addr, None, tls_settings);
-            info!("TLS listener added with callbacks and default SNI {}", sni);
-        } else {
-            warn!(
-                "Default SNI {} missing cert.pem or privkey.pem under {}",
-                sni, tls_cert_dir
-            );
-        }
     } else {
-        warn!(
-            "No TLS certs found under {}, TLS listener not added",
-            tls_cert_dir
-        );
+        let callbacks: Box<dyn TlsAccept + Send + Sync> = Box::new(SniCallbacks {
+            cache: cert_store.clone(),
+        });
+        let tls_settings = tls_settings_with_callbacks(callbacks)?;
+        proxy.add_tls_with_settings(&listen_addr, None, tls_settings);
+        info!("TLS listener added on {}", listen_addr);
     }
 
     // Add service
