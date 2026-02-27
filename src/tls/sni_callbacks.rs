@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
-
 use pingora_core::listeners::TlsAccept;
 use pingora_core::protocols::tls::TlsRef;
+use tokio::sync::RwLock;
 
 use crate::tls::cert_cache::TlsCertStore;
 
@@ -32,9 +31,7 @@ impl TlsAccept for SniCallbacks {
             });
 
         if let Some(entry) = chosen {
-            // Attach cached certificate and private key to the ongoing handshake
             if let (Some(chain), Some(pkey)) = (entry.x509_chain.as_ref(), entry.pkey.as_ref()) {
-                // Use the first cert in the chain as the leaf cert
                 if let Some(leaf) = chain.first() {
                     let _ = pingora_core::tls::ext::ssl_use_certificate(ssl, leaf);
                 }

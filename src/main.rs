@@ -592,16 +592,19 @@ fn run_pingora_proxy(
             session: &mut Session,
             _ctx: &mut Self::CTX,
         ) -> pingora_core::Result<Box<HttpPeer>> {
-            // Get Host from the Host header (HTTP/1.1) or :authority pseudo-header (HTTP/2)
-            // The URI's host() is only set for absolute URIs, not typical relative requests
-            let host = session
+            let raw_host = session
                 .req_header()
                 .headers
                 .get("host")
                 .and_then(|v| v.to_str().ok())
-                .map(|h| h.split(':').next().unwrap_or(h)) // Strip port if present
-                .unwrap_or_default()
-                .to_string();
+                .unwrap_or_default();
+
+            let host = raw_host.split(':').next().unwrap_or(raw_host).to_string();
+
+            info!(
+                "Looking up backend for host='{}' (raw='{}')",
+                host, raw_host
+            );
 
             let mut reg = self.state.registry.write().await;
             let backend = match reg.next_backend(&host, &host) {
