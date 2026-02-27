@@ -386,6 +386,12 @@ async fn forward_acme_challenge(req: Request<Body>, upstream: &str) -> Result<Re
 
     let client = Client::new();
 
+    let original_host = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let path_and_query = req
         .uri()
         .path_and_query()
@@ -402,11 +408,14 @@ async fn forward_acme_challenge(req: Request<Body>, upstream: &str) -> Result<Re
 
     let mut upstream_req = Request::builder().method(parts.method).uri(upstream_uri);
 
-    // Copy relevant headers
     for (key, value) in parts.headers.iter() {
         if key != "host" {
             upstream_req = upstream_req.header(key, value);
         }
+    }
+
+    if let Some(host) = original_host {
+        upstream_req = upstream_req.header("Host", host);
     }
 
     let upstream_req = upstream_req
