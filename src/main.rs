@@ -592,11 +592,18 @@ fn run_pingora_proxy(
             session: &mut Session,
             _ctx: &mut Self::CTX,
         ) -> pingora_core::Result<Box<HttpPeer>> {
-            let raw_host = session
-                .req_header()
-                .headers
-                .get("host")
-                .and_then(|v| v.to_str().ok())
+            let req = session.req_header();
+
+            info!(
+                "Request debug: uri={:?}, headers={:?}",
+                req.uri, req.headers
+            );
+
+            let raw_host = req
+                .uri
+                .authority()
+                .map(|a| a.as_str())
+                .or_else(|| req.headers.get("host").and_then(|v| v.to_str().ok()))
                 .unwrap_or_default();
 
             let host = raw_host.split(':').next().unwrap_or(raw_host).to_string();
