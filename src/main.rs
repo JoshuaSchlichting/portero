@@ -69,6 +69,14 @@ struct Cli {
     /// Disable TLS and run plain HTTP proxy (for testing/development)
     #[arg(long, default_value_t = false)]
     no_tls: bool,
+
+    /// HTTP listen address for ACME challenges and HTTPS redirects (e.g., "0.0.0.0:80")
+    #[arg(long)]
+    http_addr: Option<String>,
+
+    /// Upstream address for ACME HTTP-01 challenges (e.g., "loadmaster:5002")
+    #[arg(long)]
+    acme_upstream: Option<String>,
 }
 
 /// Claims expected in the JWT used for registration auth.
@@ -290,6 +298,129 @@ mod proxy_skeleton {
     }
 }
 
+/// HTTP server for port 80 that:
+/// - Forwards /.well-known/acme-challenge/* requests to the ACME upstream (e.g., loadmaster)
+/// - Redirects all other requests to HTTPS
+async fn run_http_redirect_server(http_addr: String, acme_upstream: Option<String>) -> Result<()> {
+    info!("HTTP redirect server listening on {}", http_addr);
+    if let Some(ref upstream) = acme_upstream {
+        info!("ACME challenges will be forwarded to {}", upstream);
+    }
+
+    let acme_upstream = Arc::new(acme_upstream);
+
+    let make_svc = {
+        let acme_upstream = acme_upstream.clone();
+        make_service_fn(move |_conn| {
+            let acme_upstream = acme_upstream.clone();
+            async move {
+                Ok::<_, anyhow::Error>(service_fn(move |req: Request<Body>| {
+                    let acme_upstream = acme_upstream.clone();
+                    async move {
+                        let path = req.uri().path();
+
+                        // Check if this is an ACME challenge request
+                        if path.starts_with("/.well-known/acme-challenge/") {
+                            if let Some(ref upstream) = *acme_upstream {
+                                // Forward to ACME upstream
+                                match forward_acme_challenge(req, upstream).await {
+                                    Ok(resp) => return Ok::<_, anyhow::Error>(resp),
+                                    Err(e) => {
+                                        error!("Failed to forward ACME challenge: {}", e);
+                                        let resp = Response::builder()
+                                            .status(StatusCode::BAD_GATEWAY)
+                                            .body(Body::from(format!("ACME proxy error: {}", e)))
+                                            .unwrap();
+                                        return Ok(resp);
+                                    }
+                                }
+                            } else {
+                                // No ACME upstream configured
+                                let resp = Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::from("ACME upstream not configured"))
+                                    .unwrap();
+                                return Ok(resp);
+                            }
+                        }
+
+                        // Redirect to HTTPS
+                        let host = req
+                            .headers()
+                            .get("host")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|h| h.split(':').next().unwrap_or(h)) // Strip port if present
+                            .unwrap_or("localhost");
+
+                        let uri = req.uri();
+                        let path_and_query =
+                            uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+                        let https_url = format!("https://{}{}", host, path_and_query);
+
+                        info!("Redirecting HTTP request to {}", https_url);
+
+                        let resp = Response::builder()
+                            .status(StatusCode::MOVED_PERMANENTLY)
+                            .header("Location", https_url)
+                            .body(Body::from("Redirecting to HTTPS"))
+                            .unwrap();
+
+                        Ok::<_, anyhow::Error>(resp)
+                    }
+                }))
+            }
+        })
+    };
+
+    let server = HyperServer::bind(&http_addr.parse()?).serve(make_svc);
+    server
+        .await
+        .map_err(|e| anyhow!("HTTP redirect server error: {e}"))?;
+    Ok(())
+}
+
+/// Forward an ACME challenge request to the upstream server
+async fn forward_acme_challenge(req: Request<Body>, upstream: &str) -> Result<Response<Body>> {
+    use hyper::Client;
+
+    let client = Client::new();
+
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+
+    let upstream_uri: hyper::Uri = format!("http://{}{}", upstream, path_and_query)
+        .parse()
+        .context("invalid upstream URI")?;
+
+    info!("Forwarding ACME challenge to {}", upstream_uri);
+
+    let (parts, body) = req.into_parts();
+
+    let mut upstream_req = Request::builder().method(parts.method).uri(upstream_uri);
+
+    // Copy relevant headers
+    for (key, value) in parts.headers.iter() {
+        if key != "host" {
+            upstream_req = upstream_req.header(key, value);
+        }
+    }
+
+    let upstream_req = upstream_req
+        .body(body)
+        .context("failed to build upstream request")?;
+
+    let resp = client
+        .request(upstream_req)
+        .await
+        .context("failed to forward request to ACME upstream")?;
+
+    Ok(resp)
+}
+
 /// Placeholder registration HTTP server skeleton.
 ///
 /// In practice, you would run a lightweight HTTP server for /register on `register_addr`.
@@ -406,6 +537,8 @@ fn run_pingora_proxy(
     tls_cert_dir: String,
     register_addr: String,
     no_tls: bool,
+    http_addr: Option<String>,
+    acme_upstream: Option<String>,
 ) -> Result<()> {
     info!("Proxy listening (TCP) on {}", listen_addr);
 
@@ -642,6 +775,22 @@ fn run_pingora_proxy(
         });
     });
 
+    // Start HTTP redirect server if configured
+    if let Some(http_addr) = http_addr {
+        let acme_upstream = acme_upstream.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                if let Err(e) = run_http_redirect_server(http_addr, acme_upstream).await {
+                    error!("HTTP redirect server error: {e:?}");
+                }
+            });
+        });
+    }
+
     // Run the server
     server.run_forever()
 }
@@ -664,5 +813,7 @@ fn main() -> Result<()> {
         cli.tls_cert_dir.clone(),
         cli.register_addr.clone(),
         cli.no_tls,
+        cli.http_addr.clone(),
+        cli.acme_upstream.clone(),
     )
 }

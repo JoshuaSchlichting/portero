@@ -89,8 +89,12 @@ This project uses upstream Pingora from GitHub with the BoringSSL backend enable
     - `--tls-cert-dir /etc/portero/certs`
     - `--register-secret <secret>`
     - `--jwt-hmac-key <hs256-key>`
+    - `--http-addr 0.0.0.0:80` (optional, enables HTTP listener for ACME challenges and HTTPS redirects)
+    - `--acme-upstream loadmaster:5002` (optional, upstream for ACME HTTP-01 challenge forwarding)
   - Example:
     - `./target/debug/portero --listen-addr 0.0.0.0:443 --register-addr 127.0.0.1:18080 --tls-cert-dir /etc/portero/certs --register-secret changeme --jwt-hmac-key changeme`
+  - Example with HTTP redirect and ACME forwarding:
+    - `./target/debug/portero --listen-addr 0.0.0.0:443 --register-addr 127.0.0.1:18080 --tls-cert-dir /etc/portero/certs --register-secret changeme --jwt-hmac-key changeme --http-addr 0.0.0.0:80 --acme-upstream loadmaster:5002`
 
 Quick test
 - Prepare certs for two domains:
@@ -111,6 +115,31 @@ Quick test
 - `src/registry/`
   - `models.rs`: `Backend`, `Registry` (round-robin, purge).
   - `mod.rs`: re-exports.
+
+## HTTP Redirect and ACME Challenge Forwarding
+
+When `--http-addr` is specified, Portero starts an additional HTTP listener (typically on port 80) that:
+
+1. **ACME HTTP-01 challenges**: Requests to `/.well-known/acme-challenge/*` are proxied to the upstream specified by `--acme-upstream` (e.g., a certificate manager like loadmaster).
+2. **HTTPS redirects**: All other HTTP requests receive a 301 redirect to their HTTPS equivalent.
+
+This allows Portero to be the single entry point for both HTTP and HTTPS traffic, handling automatic HTTPS upgrades while supporting ACME certificate validation.
+
+Example docker-compose usage:
+```yaml
+portero:
+  ports:
+    - "80:80"
+    - "443:443"
+  command:
+    - "--listen-addr"
+    - "0.0.0.0:443"
+    - "--http-addr"
+    - "0.0.0.0:80"
+    - "--acme-upstream"
+    - "loadmaster:5002"
+    # ... other flags
+```
 
 ## Operational notes
 
