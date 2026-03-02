@@ -274,6 +274,47 @@ async fn run_expiration_task(state: AppState) {
     }
 }
 
+/// Background task that periodically health-checks backends and removes unreachable ones.
+async fn run_health_check_task(state: AppState) {
+    use std::net::SocketAddr;
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    let mut tick = interval(Duration::from_secs(30));
+    loop {
+        tick.tick().await;
+
+        let backends_to_check: Vec<(String, String, SocketAddr)> = {
+            let reg = state.registry.read().await;
+            let mut list = Vec::new();
+            for (host, services) in reg.hosts.iter() {
+                for (service_name, queue) in services.iter() {
+                    for backend in queue.iter() {
+                        list.push((host.clone(), service_name.clone(), backend.socket_addr()));
+                    }
+                }
+            }
+            list
+        };
+
+        for (host, service_name, addr) in backends_to_check {
+            let reachable = timeout(Duration::from_secs(5), TcpStream::connect(addr))
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
+
+            if !reachable {
+                info!(
+                    "Backend {} unreachable, removing from service '{}'",
+                    addr, service_name
+                );
+                let mut reg = state.registry.write().await;
+                reg.remove_backend(&host, &service_name, addr);
+            }
+        }
+    }
+}
+
 /// Placeholder Pingora proxy service integration.
 ///
 /// In Pingora's HTTP proxy framework, you typically:
@@ -754,6 +795,17 @@ fn run_pingora_proxy(
             .unwrap();
         rt.block_on(async {
             run_expiration_task(exp_state).await;
+        });
+    });
+
+    let health_state = state.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            run_health_check_task(health_state).await;
         });
     });
 

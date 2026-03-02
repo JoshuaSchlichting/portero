@@ -46,7 +46,7 @@ impl Registry {
         ttl: Duration,
     ) {
         let expires_at = Instant::now() + ttl;
-        let backend = Backend {
+        let new_backend = Backend {
             addr: backend.addr,
             port: backend.port,
             use_tls: backend.use_tls,
@@ -54,7 +54,16 @@ impl Registry {
         };
         let services = self.hosts.entry(host.to_string()).or_default();
         let queue = services.entry(service_name.to_string()).or_default();
-        queue.push_back(backend);
+
+        if let Some(existing) = queue
+            .iter_mut()
+            .find(|b| b.addr == new_backend.addr && b.port == new_backend.port)
+        {
+            existing.use_tls = new_backend.use_tls;
+            existing.expires_at = new_backend.expires_at;
+        } else {
+            queue.push_back(new_backend);
+        }
     }
 
     /// Fetch the next backend in round-robin order for the given host and service.
@@ -70,6 +79,15 @@ impl Registry {
             // else: expired, don't reinsert
         }
         None
+    }
+
+    /// Remove a specific backend by address.
+    pub fn remove_backend(&mut self, host: &str, service_name: &str, addr: SocketAddr) {
+        if let Some(services) = self.hosts.get_mut(host) {
+            if let Some(queue) = services.get_mut(service_name) {
+                queue.retain(|b| b.socket_addr() != addr);
+            }
+        }
     }
 
     /// Remove all expired backends from all queues.
