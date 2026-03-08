@@ -1,6 +1,6 @@
 [package]
 name = "portero"
-version = "0.1.0"
+version = "0.0.0-alpha.1"
 edition = "2021"
 description = "Portero: a Pingora-based reverse proxy with dynamic backend registration"
 license = "Apache-2.0"
