@@ -124,10 +124,11 @@ impl AppState {
 #[derive(Debug, Deserialize)]
 struct RegisterPayload {
     service_name: String,
-    host: String, // IPv6 address (no brackets)
+    host: String,
     port: u16,
     ttl_seconds: u64,
     use_tls: bool,
+    instance_id: Option<String>,
 }
 
 /// Validate registration auth via shared secret and JWT (HS256).
@@ -241,8 +242,8 @@ async fn handle_register(
             addr,
             port: payload.port,
             use_tls: payload.use_tls,
-            // expires_at is computed inside upsert_backend; placeholder value here
             expires_at: Instant::now(),
+            instance_id: payload.instance_id.clone(),
         };
         reg.upsert_backend(
             &payload.service_name,
@@ -253,9 +254,20 @@ async fn handle_register(
     }
 
     info!(
-        "Registered backend {}:{} for service '{}' (tls={}, ttl={}s)",
-        addr, payload.port, payload.service_name, payload.use_tls, payload.ttl_seconds
+        "Registered backend {}:{} for service '{}' (tls={}, ttl={}s, instance_id={:?})",
+        addr,
+        payload.port,
+        payload.service_name,
+        payload.use_tls,
+        payload.ttl_seconds,
+        payload.instance_id
     );
+
+    let service_name = payload.service_name.clone();
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        health_check_service(&state_clone, &service_name, &service_name).await;
+    });
 
     let resp = http::Response::builder()
         .status(http::StatusCode::OK)
@@ -274,12 +286,36 @@ async fn run_expiration_task(state: AppState) {
     }
 }
 
-/// Background task that periodically health-checks backends and removes unreachable ones.
-async fn run_health_check_task(state: AppState) {
-    use std::net::SocketAddr;
+async fn health_check_backends(state: &AppState, backends: Vec<(String, String, SocketAddr)>) {
     use tokio::net::TcpStream;
     use tokio::time::timeout;
 
+    for (host, service_name, addr) in backends {
+        let reachable = timeout(Duration::from_secs(5), TcpStream::connect(addr))
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+
+        if !reachable {
+            info!(
+                "Backend {} unreachable, removing from service '{}'",
+                addr, service_name
+            );
+            let mut reg = state.registry.write().await;
+            reg.remove_backend(&host, &service_name, addr);
+        }
+    }
+}
+
+async fn health_check_service(state: &AppState, host: &str, service_name: &str) {
+    let backends = {
+        let reg = state.registry.read().await;
+        reg.backends_for_service(host, service_name)
+    };
+    health_check_backends(state, backends).await;
+}
+
+async fn run_health_check_task(state: AppState) {
     let mut tick = interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
@@ -297,21 +333,7 @@ async fn run_health_check_task(state: AppState) {
             list
         };
 
-        for (host, service_name, addr) in backends_to_check {
-            let reachable = timeout(Duration::from_secs(5), TcpStream::connect(addr))
-                .await
-                .map(|r| r.is_ok())
-                .unwrap_or(false);
-
-            if !reachable {
-                info!(
-                    "Backend {} unreachable, removing from service '{}'",
-                    addr, service_name
-                );
-                let mut reg = state.registry.write().await;
-                reg.remove_backend(&host, &service_name, addr);
-            }
-        }
+        health_check_backends(&state, backends_to_check).await;
     }
 }
 

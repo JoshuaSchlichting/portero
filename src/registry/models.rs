@@ -2,42 +2,31 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-/// A backend endpoint for a service.
-///
-/// - `addr`: IP address of the backend (IPv4 or IPv6)
-/// - `port`: TCP port on which the backend listens
-/// - `use_tls`: whether to use TLS (HTTPS) when connecting upstream
-/// - `expires_at`: time when this registration expires; used for TTL and purging
 #[derive(Debug, Clone)]
 pub struct Backend {
     pub addr: IpAddr,
     pub port: u16,
     pub use_tls: bool,
     pub expires_at: Instant,
+    pub instance_id: Option<String>,
 }
 
 impl Backend {
-    /// Construct a `SocketAddr` for connecting to this backend.
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.addr, self.port)
     }
 
-    /// Return true if the backend registration has expired.
     pub fn is_expired(&self) -> bool {
         Instant::now() >= self.expires_at
     }
 }
 
-/// Runtime registry for routing and registration.
-/// Maps `host -> service_name -> round-robin queue of backends`.
 #[derive(Debug, Default)]
 pub struct Registry {
     pub hosts: HashMap<String, HashMap<String, VecDeque<Backend>>>,
 }
 
 impl Registry {
-    /// Insert or update a backend registration for a given host and service.
-    /// The backend will be set to expire after `ttl` duration from now.
     pub fn upsert_backend(
         &mut self,
         host: &str,
@@ -51,23 +40,32 @@ impl Registry {
             port: backend.port,
             use_tls: backend.use_tls,
             expires_at,
+            instance_id: backend.instance_id.clone(),
         };
         let services = self.hosts.entry(host.to_string()).or_default();
         let queue = services.entry(service_name.to_string()).or_default();
 
-        if let Some(existing) = queue
-            .iter_mut()
-            .find(|b| b.addr == new_backend.addr && b.port == new_backend.port)
-        {
+        let existing = if let Some(ref id) = new_backend.instance_id {
+            queue
+                .iter_mut()
+                .find(|b| b.instance_id.as_deref() == Some(id))
+        } else {
+            queue
+                .iter_mut()
+                .find(|b| b.addr == new_backend.addr && b.port == new_backend.port)
+        };
+
+        if let Some(existing) = existing {
+            existing.addr = new_backend.addr;
+            existing.port = new_backend.port;
             existing.use_tls = new_backend.use_tls;
             existing.expires_at = new_backend.expires_at;
+            existing.instance_id = new_backend.instance_id;
         } else {
             queue.push_back(new_backend);
         }
     }
 
-    /// Fetch the next backend in round-robin order for the given host and service.
-    /// Expired backends are skipped and removed from the front.
     pub fn next_backend(&mut self, host: &str, service_name: &str) -> Option<Backend> {
         let services = self.hosts.get_mut(host)?;
         let queue = services.get_mut(service_name)?;
@@ -76,12 +74,10 @@ impl Registry {
                 queue.push_back(b.clone());
                 return Some(b);
             }
-            // else: expired, don't reinsert
         }
         None
     }
 
-    /// Remove a specific backend by address.
     pub fn remove_backend(&mut self, host: &str, service_name: &str, addr: SocketAddr) {
         if let Some(services) = self.hosts.get_mut(host) {
             if let Some(queue) = services.get_mut(service_name) {
@@ -90,12 +86,31 @@ impl Registry {
         }
     }
 
-    /// Remove all expired backends from all queues.
     pub fn purge_expired(&mut self) {
         for services in self.hosts.values_mut() {
             for queue in services.values_mut() {
                 queue.retain(|b| !b.is_expired());
             }
         }
+    }
+
+    pub fn backends_for_service(
+        &self,
+        host: &str,
+        service_name: &str,
+    ) -> Vec<(String, String, SocketAddr)> {
+        let mut list = Vec::new();
+        if let Some(services) = self.hosts.get(host) {
+            if let Some(queue) = services.get(service_name) {
+                for backend in queue.iter() {
+                    list.push((
+                        host.to_string(),
+                        service_name.to_string(),
+                        backend.socket_addr(),
+                    ));
+                }
+            }
+        }
+        list
     }
 }
