@@ -34,6 +34,7 @@ FROM debian:12-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -44,6 +45,7 @@ WORKDIR /opt/portero
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/portero /usr/local/bin/portero
+RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/portero
 
 # TLS cert directory (mounted via volume in deployments)
 # Expect structure:
