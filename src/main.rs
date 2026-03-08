@@ -254,7 +254,7 @@ async fn handle_register(
     }
 
     info!(
-        "Registered backend {}:{} for service '{}' (tls={}, ttl={}s, instance_id={:?})",
+        "Registered backend [{}]:{} for service '{}' (tls={}, ttl={}s, instance_id={:?})",
         addr,
         payload.port,
         payload.service_name,
