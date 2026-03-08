@@ -35,7 +35,15 @@ impl TlsCertStore {
     /// Scan a directory for per-domain subfolders containing `cert.pem` and `privkey.pem`.
     /// Initializes metadata and placeholders; does not parse PEMs here.
     pub fn load_from_dir(dir: &str) -> Result<Self> {
+        use std::collections::hash_map::DefaultHasher;
         use std::fs;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_bytes(data: &[u8]) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            data.hash(&mut hasher);
+            hasher.finish()
+        }
 
         let mut entries = HashMap::new();
         let mut default_sni: Option<String> = None;
@@ -56,6 +64,22 @@ impl TlsCertStore {
                 continue;
             }
 
+            let cert_bytes = fs::read(&cert_path).context("reading cert.pem")?;
+            let key_bytes = fs::read(&key_path).context("reading privkey.pem")?;
+
+            let cert_meta = fs::metadata(&cert_path).context("reading cert.pem metadata")?;
+            let key_meta = fs::metadata(&key_path).context("reading privkey.pem metadata")?;
+
+            let parsed_chain = pingora_core::tls::x509::X509::stack_from_pem(&cert_bytes).ok();
+            let parsed_pkey = pingora_core::tls::pkey::PKey::private_key_from_pem(&key_bytes).ok();
+
+            if parsed_chain.is_none() || parsed_pkey.is_none() {
+                warn!("Failed to parse PEM files for SNI {}, skipping", sni);
+                continue;
+            }
+
+            info!("Loaded TLS cert for SNI {} at boot", sni);
+
             if default_sni.is_none() {
                 default_sni = Some(sni.clone());
             }
@@ -64,12 +88,12 @@ impl TlsCertStore {
                 CertEntry {
                     cert_path: cert_path.display().to_string(),
                     key_path: key_path.display().to_string(),
-                    cert_mtime: SystemTime::UNIX_EPOCH,
-                    key_mtime: SystemTime::UNIX_EPOCH,
-                    cert_hash: 0,
-                    key_hash: 0,
-                    x509_chain: None,
-                    pkey: None,
+                    cert_mtime: cert_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    key_mtime: key_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    cert_hash: hash_bytes(&cert_bytes),
+                    key_hash: hash_bytes(&key_bytes),
+                    x509_chain: parsed_chain,
+                    pkey: parsed_pkey,
                 },
             );
         }
